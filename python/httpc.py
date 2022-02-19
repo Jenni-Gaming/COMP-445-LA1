@@ -1,83 +1,87 @@
-import json
+import socket
 import argparse
 import sys
-import socket
-import urllib.parse
+from argparse import RawTextHelpFormatter
 
-request_types = ['get', 'post']
 
-def runClient(request, URL, verbose, headersList, file, dataBody):
-    if request == request_types[0]:
-        if file is not None or dataBody is not None:
-            print(500, "GET operation cannot contain -f or -d")
-            sys.exit()
-        runRequest(request_types[0], verbose, headersList, None, URL)
-    elif request == request_types[1]:
-        if dataBody is None and file is None:
-            print(500, "POST operation needs to include -d or -f. Write --help for more information")
-        if dataBody is not None:
-            runRequest(request_types[1], verbose, headersList, str(dataBody), URL)
-        if file is not None:
-            try:
-                f = open(file)
-            except OSError:
-                print("Could not open/read file: ", file)
-                sys.exit()
-            file_data = json.load(f)
-            formatted_data = json.dumps(file_data)
-            runRequest(request_types[1], verbose, headersList, formatted_data, URL)
-
-def runRequest(request_type, isVerbose, headersList, data, URL):
-    parsedURL = urllib.parse.urlparse(URL)
-    socket_client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+def run_httpclient(httpc, port, url, verbosity, header, data, file):
     try:
-        socket_client.connect((parsedURL.netloc, 80))
-        query = buildQuery(request_type, parsedURL, headersList, data)
-        socket_client.send(query.encode())
-        http_response = socket_client.recv(4096, socket.MSG_WAITALL)
-        verbose_output, response_output = splitVerboseResponse(http_response.decode())
+        filler, fluff, host, path = url.split("/", 3)
+        path = "/" + path
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        if isVerbose:
-            print(verbose_output, "\r\n")
-        print(response_output)
-    except:
-        print("Connection failed")
+        sock.connect((host, port))
+
+        request_line = (httpc.upper() + " " + path + " HTTP/1.0\r\n")
+        header_lines = ("Host:" + host + "\r\n")
+
+        if httpc == "get":
+            if (header != None):
+                header_lines += header + "\r\n"
+            header_lines += "\r\n"  # End header
+            full_request = (request_line + header_lines).encode("utf-8")
+
+        elif httpc == "post":
+            body = data # Work under the assumption that data will be provided from either -d or -f
+            # In case where both -d & -f are present, -d is given priority
+            if data == None and file != None:
+                current_file = open(file, "r")
+                body = current_file.read()
+                current_file.close()
+            header_lines += "Content-Type:application/json\r\n"
+            if (header != None):
+                header_lines += header + "\r\n"
+            header_lines += "Content-Length:" + str(len(body)) + "\r\n\r\n"
+            full_request = (request_line + header_lines + body).encode("utf-8")
+
+        sock.sendall(full_request)
+        response = sock.recv(1024, socket.MSG_WAITALL)
+        response = response.decode("utf-8")
+
+        if not verbosity:
+            response = response.split("\r\n\r\n")[1]
+        sys.stdout.write(response)
+
     finally:
-        socket_client.close()
-        print("Connection closed.")
+        sock.close()
 
-def splitVerboseResponse(httpResponse):
-    responseList = httpResponse.split("\r\n\r\n")
-    verbose_output = responseList[0].strip()
-    response_output = responseList[1].strip()
-    return verbose_output, response_output
 
-def buildQuery(request_type, parsedURL, headersList, data):
-    params = ""
-    if parsedURL.query:
-        params = "?" + parsedURL.query
-    query = request_type.upper() + " " + parsedURL.path + params + " HTTP/1.0\r\n" + "Host: " + parsedURL.netloc + "\r\n"
+general_help = '''httpc is a curl-like application but supports HTTP protocol only. 
+Usage: 
+    httpc command [arguments]
+The commands are: 
+    get executes a HTTP GET request and prints the response.
+    post executes a HTTP POST request and prints the response.
+    help prints this screen.
 
-    if headersList is not None:
-        for header in headersList:
-            query += (header + "\r\n")
-    if request_type == 'post':
-        query += "Content-Length: " + str(len(data))
-        query += ("\r\n\r\n" + data)
-    query += "\r\n\r\n"
-    return query
+Use "httpc help [command]" for more information about a command.
+'''
 
-#-f file name & -d body request are mutually exclusive
-headerFileParser = argparse.ArgumentParser(add_help=False)
-group = headerFileParser.add_mutually_exclusive_group()
-group.add_argument('-f', help='file name')
-group.add_argument('-d', help='body request')
+get_help = '''usage: httpc get [-v] [-h key:value] URL
+Get executes a HTTP GET request for a given URL. 
+-v Prints the detail of the response such as protocol, status, and headers.
+-h key:value Associates headers to HTTP Request with the format 'key:value'.
+'''
 
-#write --help to get all documentation
-parser = argparse.ArgumentParser(prog='httpc', conflict_handler='resolve', parents=[headerFileParser])
-parser.add_argument('request', choices=['get', 'post'], default='get', help='GET or POST')
-parser.add_argument('URL', default='www.python.org', help='server host')
-parser.add_argument('-v', action='store_true', help='verbose')
-parser.add_argument('-h', nargs='*', action='extend', help='headers')
+post_help = '''usage: httpc post [-v] [-h key:value] [-d inline-data] [-f file] URL
+Post executes a HTTP POST request for a given URL with inline data or from file.
+
+-v Prints the detail of the response such as protocol, status, and headers.
+-h key:value Associates headers to HTTP Request with the format 'key:value'.
+-d string Associates an inline data to the body HTTP POST request.
+-f file Associates the content of a file to the body HTTP POST request.
+Either [-d] or [-f] can be used but not both.
+'''
+parser = argparse.ArgumentParser(description=(general_help + get_help + post_help),
+                                 formatter_class=RawTextHelpFormatter)
+parser.add_argument("--port", help="server port", type=int, default=80)
+
+parser.add_argument("httpc", help="get or post, string. request type.", type=str)
+parser.add_argument("URL", help="given URL to send requests to", type=str)
+parser.add_argument("-v", help="sets verbosity to true", action="store_true")
+parser.add_argument("-header", help="additional header line for the request, host is autogenerated", type=str, default=None)
+parser.add_argument("-d", help=" inline data to be used as body of request", type=str, default=None)
+parser.add_argument("-f", help="fielpath for body data", type=str, default=None)
 args = parser.parse_args()
-runClient(args.request, args.URL, args.v, args.h, args.f, args.d)
+
+run_httpclient(args.httpc, args.port, args.URL, args.v, args.header, args.d, args.f)
